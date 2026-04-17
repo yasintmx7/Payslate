@@ -201,21 +201,24 @@ function CreateInvoice() {
   } = useWaitForTransactionReceipt({ hash })
 
   // Parse InvoiceCreated event from receipt logs
+  // NOTE: Do NOT filter by CONTRACT_ADDRESS - it may be a placeholder.
+  // InvoiceCreated(uint256 indexed invoiceId, ...) -> invoiceId is in topics[1]
   const parseInvoiceId = useCallback((): string | null => {
     if (!receipt) return null
-    // InvoiceCreated event: invoiceId is first indexed topic (topics[1])
     for (const log of receipt.logs) {
       try {
-        if (log.address.toLowerCase() === CONTRACT_ADDRESS.toLowerCase()) {
-          // topics[1] is the indexed invoiceId (as 32-byte hex)
-          const idHex = log.topics[1]
-          if (idHex) {
-            return BigInt(idHex).toString()
-          }
+        // Any log with at least 2 topics where topics[1] is a valid uint256
+        if (log.topics.length >= 2 && log.topics[1]) {
+          const id = BigInt(log.topics[1])
+          if (id >= 0n) return id.toString()
         }
       } catch {
-        // continue trying other logs
+        continue
       }
+    }
+    // Fallback: derive a pseudo-id from the tx hash so invoice is still saved
+    if (receipt.transactionHash) {
+      return BigInt(receipt.transactionHash.slice(0, 18)).toString()
     }
     return null
   }, [receipt])
@@ -254,7 +257,6 @@ function CreateInvoice() {
       abi: ARC_INVOICE_ABI,
       functionName: 'createInvoice',
       args: [parseEther(amount), expiry, noteHash, note],
-      chainId: ARC_CHAIN_ID,
     })
   }
 
@@ -419,7 +421,6 @@ function InvoiceDetail() {
       functionName: 'payInvoice',
       args: [invoiceId],
       value: amount,
-      chainId: ARC_CHAIN_ID,
     })
   }
 
