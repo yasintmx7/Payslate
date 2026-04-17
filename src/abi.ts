@@ -23,12 +23,20 @@ export const ARC_INVOICE_ABI = [
     "name": "getInvoice",
     "inputs": [{ "name": "invoiceId", "type": "uint256", "internalType": "uint256" }],
     "outputs": [
-      { "name": "seller", "type": "address", "internalType": "address" },
-      { "name": "payer", "type": "address", "internalType": "address" },
-      { "name": "amount", "type": "uint256", "internalType": "uint256" },
-      { "name": "expiry", "type": "uint64", "internalType": "uint64" },
-      { "name": "paid", "type": "bool", "internalType": "bool" },
-      { "name": "note", "type": "string", "internalType": "string" }
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct ArcInvoice.Invoice",
+        "components": [
+          { "name": "seller",   "type": "address", "internalType": "address" },
+          { "name": "payer",    "type": "address", "internalType": "address" },
+          { "name": "amount",   "type": "uint256", "internalType": "uint256" },
+          { "name": "expiry",   "type": "uint64",  "internalType": "uint64"  },
+          { "name": "paid",     "type": "bool",    "internalType": "bool"    },
+          { "name": "noteHash", "type": "bytes32", "internalType": "bytes32" },
+          { "name": "note",     "type": "string",  "internalType": "string"  }
+        ]
+      }
     ],
     "stateMutability": "view"
   },

@@ -2,8 +2,11 @@ import { http, createConfig } from 'wagmi'
 import { mainnet, base } from 'wagmi/chains'
 import { defineChain } from 'viem'
 
+export const ARC_CHAIN_ID = 5042002
+export const CONTRACT_ADDRESS = '0x28E685b1F1cfe1B4eF0B47ccE8d30Faf24E7d53b' as `0x${string}`
+
 export const arcTestnet = defineChain({
-  id: 5042002,
+  id: ARC_CHAIN_ID,
   name: 'Arc Testnet',
   nativeCurrency: {
     decimals: 18,
@@ -24,8 +27,9 @@ export const arcTestnet = defineChain({
 export const config = createConfig({
   chains: [arcTestnet, mainnet, base],
   transports: {
-    [arcTestnet.id]: http(),
-    [mainnet.id]: http(),
-    [base.id]: http(),
+    [arcTestnet.id]: http('https://rpc.testnet.arc.network'),
+    [mainnet.id]:    http(),
+    [base.id]:       http(),
   },
 })
+

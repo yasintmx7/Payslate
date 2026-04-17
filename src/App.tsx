@@ -18,8 +18,9 @@ import {
   useSwitchChain,
 } from 'wagmi'
 import { injected } from 'wagmi/connectors'
-import { parseEther, formatEther, keccak256, toHex } from 'viem'
+import { parseEther, formatEther, keccak256, toHex, decodeEventLog, isAddress } from 'viem'
 import { ARC_INVOICE_ABI } from './abi'
+import { CONTRACT_ADDRESS, ARC_CHAIN_ID } from './config'
 import {
   Wallet,
   Plus,
@@ -33,14 +34,14 @@ import {
   FileText,
   Clock,
   Receipt,
+  Droplet,
 } from 'lucide-react'
 import { motion } from 'framer-motion'
 import { QRCodeSVG } from 'qrcode.react'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-const CONTRACT_ADDRESS = '0x1234567890123456789012345678901234567890' as `0x${string}`
-const ARC_CHAIN_ID = 5042002
 const HISTORY_KEY = 'arc_invoice_history'
+const ZERO_ADDR   = '0x0000000000000000000000000000000000000000'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 interface InvoiceRecord {
@@ -72,12 +73,21 @@ function copyToClipboard(text: string) {
   navigator.clipboard.writeText(text).catch(() => {})
 }
 
+/** Safely parse any string → BigInt. Returns 0n on failure. */
+function safeBigInt(val: string | undefined): bigint {
+  try {
+    return val ? BigInt(val) : 0n
+  } catch {
+    return 0n
+  }
+}
+
 // ─── Navbar ──────────────────────────────────────────────────────────────────
 function Navbar() {
   const { address, isConnected } = useAccount()
-  const { connect } = useConnect()
+  const { connect }  = useConnect()
   const { disconnect } = useDisconnect()
-  const chainId = useChainId()
+  const chainId      = useChainId()
   const { switchChain } = useSwitchChain()
   const isWrongNetwork = isConnected && chainId !== ARC_CHAIN_ID
 
@@ -87,7 +97,19 @@ function Navbar() {
         <Link to="/" className="nav-logo">Arc Invoice</Link>
         <span className="badge-testnet">TESTNET</span>
       </div>
-      <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+
+      <div style={{ display: 'flex', gap: '20px', alignItems: 'center' }}>
+        {/* Faucet — always visible */}
+        <a
+          href="https://faucet.circle.com"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="nav-link"
+          style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+        >
+          <Droplet size={14} color="var(--accent)" /> Faucet
+        </a>
+
         {isWrongNetwork && (
           <button
             onClick={() => switchChain({ chainId: ARC_CHAIN_ID })}
@@ -96,6 +118,7 @@ function Navbar() {
             Switch to Arc
           </button>
         )}
+
         {isConnected ? (
           <>
             <Link to="/my-invoices" className="nav-link">My Invoices</Link>
@@ -176,18 +199,18 @@ function Landing() {
 // ─── CreateInvoice ───────────────────────────────────────────────────────────
 function CreateInvoice() {
   const { isConnected, address } = useAccount()
-  const navigate = useNavigate()
-  const chainId = useChainId()
+  const navigate       = useNavigate()
+  const chainId        = useChainId()
   const isWrongNetwork = isConnected && chainId !== ARC_CHAIN_ID
 
-  const [amount, setAmount] = useState('')
-  const [note, setNote] = useState('')
-  const [expiryDays, setExpiryDays] = useState('7')
+  const [amount,      setAmount]      = useState('')
+  const [note,        setNote]        = useState('')
+  const [expiryDays,  setExpiryDays]  = useState('7')
   const [redirecting, setRedirecting] = useState(false)
 
   const {
     writeContract,
-    data: hash,
+    data: txHash,
     isPending,
     error: writeError,
     reset,
@@ -198,27 +221,34 @@ function CreateInvoice() {
     isLoading: isConfirming,
     isSuccess,
     error: receiptError,
-  } = useWaitForTransactionReceipt({ hash })
+  } = useWaitForTransactionReceipt({ hash: txHash })
 
-  // Parse InvoiceCreated event from receipt logs
-  // NOTE: Do NOT filter by CONTRACT_ADDRESS - it may be a placeholder.
-  // InvoiceCreated(uint256 indexed invoiceId, ...) -> invoiceId is in topics[1]
+  /**
+   * Parse the InvoiceCreated event from the transaction receipt.
+   * Filters strictly by CONTRACT_ADDRESS so we get OUR event.
+   */
   const parseInvoiceId = useCallback((): string | null => {
     if (!receipt) return null
+
     for (const log of receipt.logs) {
+      // Only look at logs emitted by our contract
+      if (log.address.toLowerCase() !== CONTRACT_ADDRESS.toLowerCase()) continue
+
       try {
-        // Any log with at least 2 topics where topics[1] is a valid uint256
-        if (log.topics.length >= 2 && log.topics[1]) {
-          const id = BigInt(log.topics[1])
-          if (id >= 0n) return id.toString()
+        const decoded = decodeEventLog({
+          abi: ARC_INVOICE_ABI,
+          data: log.data,
+          topics: log.topics,
+          strict: false,
+        })
+        if (decoded.eventName === 'InvoiceCreated' && decoded.args) {
+          // @ts-ignore – invoiceId is uint256 bigint
+          const invoiceId = decoded.args.invoiceId
+          if (invoiceId !== undefined) return invoiceId.toString()
         }
       } catch {
         continue
       }
-    }
-    // Fallback: derive a pseudo-id from the tx hash so invoice is still saved
-    if (receipt.transactionHash) {
-      return BigInt(receipt.transactionHash.slice(0, 18)).toString()
     }
     return null
   }, [receipt])
@@ -226,11 +256,9 @@ function CreateInvoice() {
   useEffect(() => {
     if (!isSuccess || !receipt || redirecting) return
     const id = parseInvoiceId()
-    if (!id) return
+    if (!id) return   // no valid ID found — don't redirect to garbage
 
     setRedirecting(true)
-
-    // Save to history immediately
     saveInvoice({
       id,
       hash: receipt.transactionHash,
@@ -238,8 +266,6 @@ function CreateInvoice() {
       note,
       date: Date.now(),
     })
-
-    // Auto-redirect to the invoice page
     navigate(`/invoice/${id}`)
   }, [isSuccess, receipt, redirecting, parseInvoiceId, amount, note, navigate])
 
@@ -249,14 +275,15 @@ function CreateInvoice() {
     if (isWrongNetwork) return alert('Please switch to Arc Testnet.')
     if (!amount || parseFloat(amount) <= 0) return alert('Enter a valid amount.')
 
-    const expiry = BigInt(Math.floor(Date.now() / 1000) + parseInt(expiryDays) * 86400)
+    const expiryTs = BigInt(Math.floor(Date.now() / 1000) + parseInt(expiryDays) * 86400)
     const noteHash = keccak256(toHex(note))
 
     writeContract({
       address: CONTRACT_ADDRESS,
       abi: ARC_INVOICE_ABI,
       functionName: 'createInvoice',
-      args: [parseEther(amount), expiry, noteHash, note],
+      // ABI: amount(uint256), expiry(uint64), noteHash(bytes32), note(string)
+      args: [parseEther(amount), expiryTs, noteHash, note],
     })
   }
 
@@ -319,7 +346,7 @@ function CreateInvoice() {
 
           {txError && (
             <div className="error-box">
-              {(txError as Error).message?.slice(0, 120) ?? 'Transaction failed'}
+              {(txError as Error).message?.slice(0, 180) ?? 'Transaction failed'}
             </div>
           )}
 
@@ -357,21 +384,26 @@ function CreateInvoice() {
 
 // ─── InvoiceDetail ───────────────────────────────────────────────────────────
 function InvoiceDetail() {
-  const { id } = useParams<{ id: string }>()
+  const { id }     = useParams<{ id: string }>()
   const { isConnected } = useAccount()
-  const chainId = useChainId()
+  const chainId    = useChainId()
   const isWrongNetwork = isConnected && chainId !== ARC_CHAIN_ID
   const [copied, setCopied] = useState(false)
 
-  const invoiceId = BigInt(id ?? '0')
+  // BUG FIX: safeBigInt prevents BigInt() crash on malformed URL params
+  const invoiceId = safeBigInt(id)
   const shareLink = `${window.location.origin}/invoice/${id}`
 
-  const { data: invoiceData, isLoading } = useReadContract({
+  const { data, isLoading, isError, isSuccess } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: ARC_INVOICE_ABI,
     functionName: 'getInvoice',
     args: [invoiceId],
-    query: { enabled: invoiceId > 0n },
+    query: {
+      enabled: invoiceId > 0n,   // skip fetch for 0 / invalid IDs
+      retry: 1,
+      retryDelay: 1000,
+    },
   })
 
   const {
@@ -383,28 +415,54 @@ function InvoiceDetail() {
   const { isLoading: isPayConfirming, isSuccess: isPaid } =
     useWaitForTransactionReceipt({ hash: payHash })
 
+  // BUG FIX: viem returns tuple struct as an object with named keys
+  const inv    = data as any
+  const seller: string  = inv?.seller ?? ''
+  const payer:  string  = inv?.payer  ?? ''
+  const amount: bigint  = inv?.amount ?? 0n
+  const expiry: bigint  = inv?.expiry ?? 0n
+  const paid:   boolean = inv?.paid   ?? false
+  const note:   string  = inv?.note   ?? ''
+
+  // Invoice is real if seller is non-zero address
+  const exists = isSuccess && isAddress(seller) && seller.toLowerCase() !== ZERO_ADDR
+
+  // ── Guard: loading state ──────────────────────────────────────────────────
+  // BUG FIX: only show spinner while a fetch is actually in-flight
   if (isLoading) {
     return (
       <div className="container center-content">
         <Loader2 size={40} className="spin" />
+        <p style={{ color: 'var(--text-secondary)', marginTop: '14px', fontSize: '0.9rem' }}>
+          Loading invoice…
+        </p>
       </div>
     )
   }
 
-  if (!invoiceData) {
+  // ── Guard: not found / bad ID ────────────────────────────────────────────
+  if (invoiceId === 0n || isError || (isSuccess && !exists)) {
     return (
       <div className="container">
         <Link to="/" className="back-link"><ChevronLeft size={16} /> Home</Link>
         <div className="card center-content" style={{ gap: '16px' }}>
-          <h2>Invoice not found</h2>
-          <p style={{ color: 'var(--text-secondary)' }}>ID #{id} does not exist on chain.</p>
+          <div style={{ background: 'rgba(239,68,68,0.1)', padding: '20px', borderRadius: '50%' }}>
+            <FileText size={40} color="var(--error)" />
+          </div>
+          <h2 style={{ fontSize: '1.8rem' }}>Invoice not found</h2>
+          <p style={{ color: 'var(--text-secondary)', textAlign: 'center', maxWidth: '300px' }}>
+            Invoice <code>#{id}</code> does not exist on the Arc Network.
+          </p>
+          <Link to="/" className="btn-ghost" style={{ marginTop: '10px' }}>
+            Return to Dashboard
+          </Link>
         </div>
       </div>
     )
   }
 
-  const [seller, payer, amount, expiry, paid, note] = invoiceData
-  const isExpired = BigInt(Math.floor(Date.now() / 1000)) > expiry
+  const nowSec     = BigInt(Math.floor(Date.now() / 1000))
+  const isExpired  = nowSec > expiry
   const alreadyPaid = paid || isPaid
 
   const handleCopy = () => {
@@ -448,6 +506,10 @@ function InvoiceDetail() {
 
         {/* Details */}
         <div className="detail-block">
+          <div className="detail-row">
+            <span className="detail-label">Invoice #</span>
+            <span className="detail-value">{id}</span>
+          </div>
           <div className="detail-row">
             <span className="detail-label">From</span>
             <code className="detail-value">{seller.slice(0,10)}…{seller.slice(-8)}</code>
@@ -537,7 +599,7 @@ function InvoiceDetail() {
 // ─── MyInvoices ──────────────────────────────────────────────────────────────
 function MyInvoices() {
   const [history, setHistory] = useState<InvoiceRecord[]>([])
-  const [copied, setCopied] = useState<string | null>(null)
+  const [copied,  setCopied]  = useState<string | null>(null)
 
   useEffect(() => {
     setHistory(getHistory())
@@ -581,15 +643,10 @@ function MyInvoices() {
                 </p>
               </div>
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexShrink: 0 }}>
-                <button
-                  onClick={() => handleCopy(inv.id)}
-                  className="btn-ghost btn-sm"
-                >
+                <button onClick={() => handleCopy(inv.id)} className="btn-ghost btn-sm">
                   <Copy size={13} /> {copied === inv.id ? 'Copied!' : 'Link'}
                 </button>
-                <Link to={`/invoice/${inv.id}`} className="btn-ghost btn-sm">
-                  View
-                </Link>
+                <Link to={`/invoice/${inv.id}`} className="btn-ghost btn-sm">View</Link>
                 <a
                   href={`https://testnet.arcscan.app/tx/${inv.hash}`}
                   target="_blank"
@@ -629,8 +686,8 @@ function App() {
         <Navbar />
         <main style={{ flex: 1 }}>
           <Routes>
-            <Route path="/" element={<Landing />} />
-            <Route path="/create" element={<CreateInvoice />} />
+            <Route path="/"            element={<Landing />} />
+            <Route path="/create"      element={<CreateInvoice />} />
             <Route path="/invoice/:id" element={<InvoiceDetail />} />
             <Route path="/my-invoices" element={<MyInvoices />} />
           </Routes>
