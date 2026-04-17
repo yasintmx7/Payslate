@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect } from 'react'
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useParams } from 'react-router-dom'
 import { useAccount, useConnect, useDisconnect, useReadContract, useWriteContract, useWaitForTransactionReceipt, useChainId, useSwitchChain } from 'wagmi'
 import { injected } from 'wagmi/connectors'
@@ -355,7 +355,6 @@ function InvoiceDetail() {
 }
 
 function MyInvoices() {
-  const navigate = useNavigate()
   const getHistory = () => {
     const keys = ['invoice_history', 'paynote_history', 'arc_invoices']
     let combined: any[] = []
