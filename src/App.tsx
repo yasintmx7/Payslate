@@ -153,10 +153,10 @@ function CreateInvoice() {
   const [note, setNote] = useState('')
   const [expiryDays, setExpiryDays] = useState('7')
 
-  // Safely process logs in a side effect
+  // Safely process logs in a side effect and REDIRECT
   useEffect(() => {
     if (isSuccess && receipt) {
-      const log = receipt.logs.find(l => l.address.toLowerCase() === CONTRACT_ADDRESS.toLowerCase())
+      const log = receipt.logs.find(l => l.address.toLowerCase() === CONTRACT_ADDRESS.toLowerCase());
       if (log) {
         try {
           const decoded = decodeEventLog({
@@ -164,30 +164,34 @@ function CreateInvoice() {
             eventName: 'InvoiceCreated',
             data: log.data,
             topics: log.topics,
-          })
+          });
           if (decoded.args && 'invoiceId' in decoded.args) {
-            const id = decoded.args.invoiceId as bigint
-            if (!createdInvoiceId || createdInvoiceId !== id) {
-              const history = JSON.parse(localStorage.getItem('invoice_history') || '[]')
-              if (!history.find((h: any) => h.id === id.toString())) {
-                history.push({ 
-                  hash: receipt.transactionHash, 
-                  id: id.toString(), 
-                  amount, 
-                  note, 
-                  date: Date.now() 
-                })
-                localStorage.setItem('invoice_history', JSON.stringify(history))
-                setCreatedInvoiceId(id)
-              }
+            const id = (decoded.args.invoiceId as bigint).toString();
+            
+            // 1. Check if already saved to avoid loops
+            const history = JSON.parse(localStorage.getItem('invoice_history') || '[]');
+            if (!history.find((h: any) => h.id === id)) {
+              // 2. Save to history
+              history.push({ 
+                hash: receipt.transactionHash, 
+                id: id, 
+                amount, 
+                note, 
+                date: Date.now() 
+              });
+              localStorage.setItem('invoice_history', JSON.stringify(history));
+              
+              // 3. SET STATE AND REDIRECT
+              setCreatedInvoiceId(BigInt(id));
+              setTimeout(() => navigate(`/invoice/${id}`), 1000); // 1s delay for UI feedback
             }
           }
         } catch (e) {
-          console.error('Failed to decode log', e)
+          console.error('Failed to decode log', e);
         }
       }
     }
-  }, [isSuccess, receipt, CONTRACT_ADDRESS, amount, note, createdInvoiceId])
+  }, [isSuccess, receipt, CONTRACT_ADDRESS, amount, note, navigate])
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
