@@ -40,7 +40,7 @@ import { motion } from 'framer-motion'
 import { QRCodeSVG } from 'qrcode.react'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-const HISTORY_KEY = 'arc_invoice_history'
+const historyKey = (address: string) => `arc_invoice_history_${address.toLowerCase()}`
 const ZERO_ADDR   = '0x0000000000000000000000000000000000000000'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -53,19 +53,19 @@ interface InvoiceRecord {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-function getHistory(): InvoiceRecord[] {
+function getHistory(address: string): InvoiceRecord[] {
   try {
-    return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]')
+    return JSON.parse(localStorage.getItem(historyKey(address)) || '[]')
   } catch {
     return []
   }
 }
 
-function saveInvoice(record: InvoiceRecord): void {
-  const history = getHistory()
+function saveInvoice(record: InvoiceRecord, address: string): void {
+  const history = getHistory(address)
   if (!history.find((h) => h.id === record.id)) {
     history.unshift(record)
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(history))
+    localStorage.setItem(historyKey(address), JSON.stringify(history))
   }
 }
 
@@ -257,6 +257,7 @@ function CreateInvoice() {
     if (!isSuccess || !receipt || redirecting) return
     const id = parseInvoiceId()
     if (!id) return   // no valid ID found — don't redirect to garbage
+    if (!address) return
 
     setRedirecting(true)
     saveInvoice({
@@ -265,9 +266,9 @@ function CreateInvoice() {
       amount,
       note,
       date: Date.now(),
-    })
+    }, address)
     navigate(`/invoice/${id}`)
-  }, [isSuccess, receipt, redirecting, parseInvoiceId, amount, note, navigate])
+  }, [isSuccess, receipt, redirecting, parseInvoiceId, amount, note, address, navigate])
 
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault()
@@ -598,17 +599,34 @@ function InvoiceDetail() {
 
 // ─── MyInvoices ──────────────────────────────────────────────────────────────
 function MyInvoices() {
+  const { address, isConnected } = useAccount()
   const [history, setHistory] = useState<InvoiceRecord[]>([])
   const [copied,  setCopied]  = useState<string | null>(null)
 
   useEffect(() => {
-    setHistory(getHistory())
-  }, [])
+    if (address) {
+      setHistory(getHistory(address))
+    } else {
+      setHistory([])
+    }
+  }, [address])
 
   const handleCopy = (id: string) => {
     copyToClipboard(`${window.location.origin}/invoice/${id}`)
     setCopied(id)
     setTimeout(() => setCopied(null), 2000)
+  }
+
+  if (!isConnected) {
+    return (
+      <div className="container">
+        <Link to="/" className="back-link"><ChevronLeft size={16} /> Dashboard</Link>
+        <div className="empty-state">
+          <Wallet size={40} style={{ opacity: 0.3, marginBottom: '12px' }} />
+          <p>Connect your wallet to view your invoices.</p>
+        </div>
+      </div>
+    )
   }
 
   return (
