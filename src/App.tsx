@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
   BrowserRouter as Router,
   Routes,
@@ -12,15 +12,16 @@ import {
   useConnect,
   useDisconnect,
   useReadContract,
+  useReadContracts,
   useWriteContract,
   useWaitForTransactionReceipt,
   useChainId,
   useSwitchChain,
 } from 'wagmi'
 import { injected } from 'wagmi/connectors'
-import { parseEther, formatEther, keccak256, toHex, decodeEventLog, isAddress } from 'viem'
+import { parseUnits, formatUnits, keccak256, toHex, decodeEventLog, isAddress } from 'viem'
 import { ARC_INVOICE_ABI } from './abi'
-import { CONTRACT_ADDRESS, ARC_CHAIN_ID } from './config'
+import { CONTRACT_ADDRESS, ARC_CHAIN_ID, USDC_DECIMALS } from './config'
 import {
   Wallet,
   Plus,
@@ -35,13 +36,16 @@ import {
   Clock,
   Receipt,
   Droplet,
+  X,
+  AlertCircle,
 } from 'lucide-react'
-import { motion } from 'framer-motion'
+import { motion, AnimatePresence } from 'framer-motion'
 import { QRCodeSVG } from 'qrcode.react'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 const historyKey = (address: string) => `arc_invoice_history_${address.toLowerCase()}`
-const ZERO_ADDR   = '0x0000000000000000000000000000000000000000'
+const ZERO_ADDR  = '0x0000000000000000000000000000000000000000'
+const NOTE_MAX   = 200
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 interface InvoiceRecord {
@@ -50,6 +54,84 @@ interface InvoiceRecord {
   amount: string
   note: string
   date: number
+}
+
+interface Toast {
+  id: number
+  type: 'success' | 'error' | 'info'
+  message: string
+}
+
+// ─── Toast Context ────────────────────────────────────────────────────────────
+let _addToast: ((t: Omit<Toast, 'id'>) => void) | null = null
+
+function useToastEmitter() {
+  return {
+    success: (msg: string) => _addToast?.({ type: 'success', message: msg }),
+    error:   (msg: string) => _addToast?.({ type: 'error',   message: msg }),
+    info:    (msg: string) => _addToast?.({ type: 'info',    message: msg }),
+  }
+}
+
+// ─── Toast UI ─────────────────────────────────────────────────────────────────
+function ToastContainer() {
+  const [toasts, setToasts] = useState<Toast[]>([])
+  const counter = useRef(0)
+
+  useEffect(() => {
+    _addToast = (t) => {
+      const id = ++counter.current
+      setToasts(prev => [...prev, { ...t, id }])
+      setTimeout(() => setToasts(prev => prev.filter(x => x.id !== id)), 4000)
+    }
+    return () => { _addToast = null }
+  }, [])
+
+  const icon = (type: Toast['type']) => {
+    if (type === 'success') return <CheckCircle size={16} />
+    if (type === 'error')   return <AlertCircle size={16} />
+    return <Info size={16} />
+  }
+
+  return (
+    <div className="toast-container">
+      <AnimatePresence>
+        {toasts.map(t => (
+          <motion.div
+            key={t.id}
+            className={`toast toast-${t.type}`}
+            initial={{ opacity: 0, y: 20, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -10, scale: 0.95 }}
+            transition={{ duration: 0.22 }}
+          >
+            {icon(t.type)}
+            <span>{t.message}</span>
+            <button onClick={() => setToasts(prev => prev.filter(x => x.id !== t.id))} className="toast-close">
+              <X size={14} />
+            </button>
+          </motion.div>
+        ))}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+// ─── Skeleton ─────────────────────────────────────────────────────────────────
+function InvoiceSkeleton() {
+  return (
+    <div className="invoice-row card skeleton-row">
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        <div className="skeleton" style={{ width: '80px', height: '18px', borderRadius: '6px' }} />
+        <div className="skeleton" style={{ width: '160px', height: '13px', borderRadius: '6px' }} />
+        <div className="skeleton" style={{ width: '110px', height: '11px', borderRadius: '6px' }} />
+      </div>
+      <div style={{ display: 'flex', gap: '8px' }}>
+        <div className="skeleton" style={{ width: '60px', height: '32px', borderRadius: '8px' }} />
+        <div className="skeleton" style={{ width: '44px', height: '32px', borderRadius: '8px' }} />
+      </div>
+    </div>
+  )
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -82,12 +164,17 @@ function safeBigInt(val: string | undefined): bigint {
   }
 }
 
+/** Format USDC amount safely — uses 6 decimals */
+function fmtUsdc(amount: bigint): string {
+  return formatUnits(amount, USDC_DECIMALS)
+}
+
 // ─── Navbar ──────────────────────────────────────────────────────────────────
 function Navbar() {
   const { address, isConnected } = useAccount()
-  const { connect }  = useConnect()
+  const { connect }    = useConnect()
   const { disconnect } = useDisconnect()
-  const chainId      = useChainId()
+  const chainId        = useChainId()
   const { switchChain } = useSwitchChain()
   const isWrongNetwork = isConnected && chainId !== ARC_CHAIN_ID
 
@@ -202,6 +289,7 @@ function CreateInvoice() {
   const navigate       = useNavigate()
   const chainId        = useChainId()
   const isWrongNetwork = isConnected && chainId !== ARC_CHAIN_ID
+  const toast          = useToastEmitter()
 
   const [amount,      setAmount]      = useState('')
   const [note,        setNote]        = useState('')
@@ -231,7 +319,6 @@ function CreateInvoice() {
     if (!receipt) return null
 
     for (const log of receipt.logs) {
-      // Only look at logs emitted by our contract
       if (log.address.toLowerCase() !== CONTRACT_ADDRESS.toLowerCase()) continue
 
       try {
@@ -256,25 +343,31 @@ function CreateInvoice() {
   useEffect(() => {
     if (!isSuccess || !receipt || redirecting) return
     const id = parseInvoiceId()
-    if (!id) return   // no valid ID found — don't redirect to garbage
+    if (!id) return
     if (!address) return
 
     setRedirecting(true)
-    saveInvoice({
-      id,
-      hash: receipt.transactionHash,
-      amount,
-      note,
-      date: Date.now(),
-    }, address)
+    saveInvoice({ id, hash: receipt.transactionHash, amount, note, date: Date.now() }, address)
+    toast.success('Invoice created successfully!')
     navigate(`/invoice/${id}`)
   }, [isSuccess, receipt, redirecting, parseInvoiceId, amount, note, address, navigate])
 
+  // Show write errors as toasts
+  useEffect(() => {
+    if (writeError) toast.error((writeError as Error).message?.slice(0, 120) ?? 'Transaction failed')
+  }, [writeError])
+
+  useEffect(() => {
+    if (receiptError) toast.error('Receipt error: ' + (receiptError as Error).message?.slice(0, 100))
+  }, [receiptError])
+
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!isConnected) return alert('Please connect your wallet first.')
-    if (isWrongNetwork) return alert('Please switch to Arc Testnet.')
-    if (!amount || parseFloat(amount) <= 0) return alert('Enter a valid amount.')
+    if (!isConnected) { toast.info('Please connect your wallet first.'); return }
+    if (isWrongNetwork) { toast.info('Please switch to Arc Testnet.'); return }
+    if (!amount || parseFloat(amount) <= 0) { toast.error('Enter a valid amount greater than 0.'); return }
+    if (parseFloat(amount) < 0.01) { toast.error('Minimum invoice amount is 0.01 USDC.'); return }
+    if (!note.trim()) { toast.error('Please enter an invoice note.'); return }
 
     const expiryTs = BigInt(Math.floor(Date.now() / 1000) + parseInt(expiryDays) * 86400)
     const noteHash = keccak256(toHex(note))
@@ -283,12 +376,13 @@ function CreateInvoice() {
       address: CONTRACT_ADDRESS,
       abi: ARC_INVOICE_ABI,
       functionName: 'createInvoice',
-      // ABI: amount(uint256), expiry(uint64), noteHash(bytes32), note(string)
-      args: [parseEther(amount), expiryTs, noteHash, note],
+      // ✅ Fixed: parseUnits with 6 decimals (USDC), not parseEther (18)
+      args: [parseUnits(amount, USDC_DECIMALS), expiryTs, noteHash, note],
     })
   }
 
-  const txError = writeError || receiptError
+  const noteCharsLeft = NOTE_MAX - note.length
+  const isOverLimit   = noteCharsLeft < 0
 
   return (
     <div className="container">
@@ -311,6 +405,11 @@ function CreateInvoice() {
               required
               disabled={isPending || isConfirming}
             />
+            {amount && parseFloat(amount) > 0 && (
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                ≈ {parseFloat(amount).toLocaleString('en-US', { style: 'currency', currency: 'USD' })} USDC
+              </span>
+            )}
           </div>
 
           {address && (
@@ -321,14 +420,21 @@ function CreateInvoice() {
           )}
 
           <div className="field">
-            <label>Invoice Note</label>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label>Invoice Note</label>
+              <span className={`char-count ${isOverLimit ? 'char-count-over' : noteCharsLeft <= 30 ? 'char-count-warn' : ''}`}>
+                {noteCharsLeft}
+              </span>
+            </div>
             <textarea
               placeholder="e.g. Design work for March"
               value={note}
-              onChange={(e) => setNote(e.target.value)}
+              onChange={(e) => setNote(e.target.value.slice(0, NOTE_MAX + 5))}
               required
               disabled={isPending || isConfirming}
               rows={3}
+              maxLength={NOTE_MAX}
+              style={{ borderColor: isOverLimit ? 'var(--error)' : undefined }}
             />
           </div>
 
@@ -345,12 +451,6 @@ function CreateInvoice() {
             </select>
           </div>
 
-          {txError && (
-            <div className="error-box">
-              {(txError as Error).message?.slice(0, 180) ?? 'Transaction failed'}
-            </div>
-          )}
-
           {(isPending || isConfirming || redirecting) && (
             <div className="status-box">
               <Loader2 size={16} className="spin" />
@@ -366,7 +466,7 @@ function CreateInvoice() {
             <button
               type="submit"
               className="btn-primary"
-              disabled={isWrongNetwork || isPending || isConfirming || redirecting}
+              disabled={isOverLimit || isWrongNetwork || isPending || isConfirming || redirecting}
               style={{ flex: 1 }}
             >
               {isWrongNetwork ? 'Switch to Arc' : 'Create Invoice'}
@@ -386,12 +486,14 @@ function CreateInvoice() {
 // ─── InvoiceDetail ───────────────────────────────────────────────────────────
 function InvoiceDetail() {
   const { id }     = useParams<{ id: string }>()
-  const { isConnected } = useAccount()
+  const { isConnected, address } = useAccount()
   const chainId    = useChainId()
   const isWrongNetwork = isConnected && chainId !== ARC_CHAIN_ID
-  const [copied, setCopied] = useState(false)
+  const [copied,  setCopied]  = useState(false)
+  const [showPayConfirm, setShowPayConfirm] = useState(false)
+  const toast = useToastEmitter()
 
-  // BUG FIX: safeBigInt prevents BigInt() crash on malformed URL params
+  // safeBigInt prevents BigInt() crash on malformed URL params
   const invoiceId = safeBigInt(id)
   const shareLink = `${window.location.origin}/invoice/${id}`
 
@@ -401,7 +503,7 @@ function InvoiceDetail() {
     functionName: 'getInvoice',
     args: [invoiceId],
     query: {
-      enabled: invoiceId > 0n,   // skip fetch for 0 / invalid IDs
+      enabled: invoiceId > 0n,
       retry: 1,
       retryDelay: 1000,
     },
@@ -416,7 +518,11 @@ function InvoiceDetail() {
   const { isLoading: isPayConfirming, isSuccess: isPaid } =
     useWaitForTransactionReceipt({ hash: payHash })
 
-  // BUG FIX: viem returns tuple struct as an object with named keys
+  useEffect(() => {
+    if (isPaid) toast.success('Payment sent successfully!')
+  }, [isPaid])
+
+  // viem returns tuple struct as an object with named keys
   const inv    = data as any
   const seller: string  = inv?.seller ?? ''
   const payer:  string  = inv?.payer  ?? ''
@@ -429,7 +535,6 @@ function InvoiceDetail() {
   const exists = isSuccess && isAddress(seller) && seller.toLowerCase() !== ZERO_ADDR
 
   // ── Guard: loading state ──────────────────────────────────────────────────
-  // BUG FIX: only show spinner while a fetch is actually in-flight
   if (isLoading) {
     return (
       <div className="container center-content">
@@ -462,18 +567,25 @@ function InvoiceDetail() {
     )
   }
 
-  const nowSec     = BigInt(Math.floor(Date.now() / 1000))
-  const isExpired  = nowSec > expiry
+  const nowSec      = BigInt(Math.floor(Date.now() / 1000))
+  const isExpired   = nowSec > expiry
   const alreadyPaid = paid || isPaid
 
   const handleCopy = () => {
     copyToClipboard(shareLink)
     setCopied(true)
+    toast.success('Link copied to clipboard!')
     setTimeout(() => setCopied(false), 2000)
   }
 
-  const handlePay = () => {
-    if (!isConnected) return alert('Please connect your wallet first.')
+  const confirmPay = () => {
+    if (!isConnected) { toast.info('Please connect your wallet first.'); return }
+    if (isWrongNetwork) { toast.info('Please switch to Arc Testnet first.'); return }
+    setShowPayConfirm(true)
+  }
+
+  const executePay = () => {
+    setShowPayConfirm(false)
     writeContract({
       address: CONTRACT_ADDRESS,
       abi: ARC_INVOICE_ABI,
@@ -482,6 +594,9 @@ function InvoiceDetail() {
       value: amount,
     })
   }
+
+  // Is this invoice owned by the connected wallet?
+  const isOwner = address && seller.toLowerCase() === address.toLowerCase()
 
   return (
     <div className="container">
@@ -492,7 +607,8 @@ function InvoiceDetail() {
         <div style={{ textAlign: 'center', marginBottom: '28px' }}>
           <p className="label">Payment Request</p>
           <div className="invoice-amount">
-            {formatEther(amount)} <span className="amount-unit">USDC</span>
+            {/* ✅ Fixed: formatUnits with 6 decimals */}
+            {fmtUsdc(amount)} <span className="amount-unit">USDC</span>
           </div>
           <div style={{ marginTop: '8px' }}>
             {alreadyPaid ? (
@@ -531,6 +647,14 @@ function InvoiceDetail() {
               <span style={{ color: 'var(--text-primary)', fontSize: '0.95rem' }}>{note}</span>
             </div>
           )}
+          {isOwner && (
+            <div className="detail-row">
+              <span className="detail-label">Role</span>
+              <span className="badge badge-paid" style={{ fontSize: '0.7rem', padding: '3px 8px' }}>
+                <ShieldCheck size={11} /> Your Invoice
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Share Link */}
@@ -563,10 +687,10 @@ function InvoiceDetail() {
           </div>
         </div>
 
-        {/* Pay Button */}
-        {!alreadyPaid && !isExpired && (
+        {/* Pay Button — with confirmation */}
+        {!alreadyPaid && !isExpired && !isOwner && (
           <button
-            onClick={handlePay}
+            onClick={confirmPay}
             className="btn-primary"
             disabled={isWrongNetwork || isPayPending || isPayConfirming}
             style={{ marginTop: '20px' }}
@@ -576,7 +700,7 @@ function InvoiceDetail() {
             ) : isWrongNetwork ? (
               'Switch to Arc'
             ) : (
-              'Pay with Wallet'
+              `Pay ${fmtUsdc(amount)} USDC`
             )}
           </button>
         )}
@@ -593,6 +717,59 @@ function InvoiceDetail() {
           </a>
         </div>
       </div>
+
+      {/* Pay Confirmation Modal */}
+      <AnimatePresence>
+        {showPayConfirm && (
+          <motion.div
+            className="modal-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setShowPayConfirm(false)}
+          >
+            <motion.div
+              className="modal-card"
+              initial={{ scale: 0.93, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.93, opacity: 0, y: 20 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ textAlign: 'center', marginBottom: '20px' }}>
+                <div className="modal-icon">
+                  <Wallet size={24} color="var(--accent)" />
+                </div>
+                <h3 style={{ fontSize: '1.2rem', fontWeight: 800, marginTop: '14px' }}>Confirm Payment</h3>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginTop: '8px' }}>
+                  You are about to pay
+                </p>
+                <p style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--accent)', margin: '8px 0' }}>
+                  {fmtUsdc(amount)} USDC
+                </p>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                  to <code>{seller.slice(0,8)}…{seller.slice(-6)}</code>
+                </p>
+                {note && (
+                  <p style={{ marginTop: '10px', fontSize: '0.82rem', color: 'var(--text-secondary)', fontStyle: 'italic' }}>
+                    "{note}"
+                  </p>
+                )}
+                <p style={{ marginTop: '12px', fontSize: '0.75rem', color: 'var(--error)' }}>
+                  ⚠ This transaction is irreversible once confirmed.
+                </p>
+              </div>
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button className="btn-ghost" style={{ flex: 1 }} onClick={() => setShowPayConfirm(false)}>
+                  Cancel
+                </button>
+                <button className="btn-primary" style={{ flex: 1 }} onClick={executePay}>
+                  Confirm & Pay
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }
@@ -600,20 +777,27 @@ function InvoiceDetail() {
 // ─── MyInvoices ──────────────────────────────────────────────────────────────
 function MyInvoices() {
   const { address, isConnected } = useAccount()
-  const [history, setHistory] = useState<InvoiceRecord[]>([])
-  const [copied,  setCopied]  = useState<string | null>(null)
+  const [history,  setHistory]  = useState<InvoiceRecord[]>([])
+  const [loading,  setLoading]  = useState(true)
+  const [copied,   setCopied]   = useState<string | null>(null)
+  const toast = useToastEmitter()
 
   useEffect(() => {
+    setLoading(true)
     if (address) {
       setHistory(getHistory(address))
     } else {
       setHistory([])
     }
+    // Tiny delay for skeleton to not flash
+    const t = setTimeout(() => setLoading(false), 300)
+    return () => clearTimeout(t)
   }, [address])
 
   const handleCopy = (id: string) => {
     copyToClipboard(`${window.location.origin}/invoice/${id}`)
     setCopied(id)
+    toast.success('Link copied!')
     setTimeout(() => setCopied(null), 2000)
   }
 
@@ -629,6 +813,30 @@ function MyInvoices() {
     )
   }
 
+  // ── Live status fetch for all invoices ────────────────────────────────────
+  const contracts = history.map((inv) => ({
+    address: CONTRACT_ADDRESS,
+    abi: ARC_INVOICE_ABI,
+    functionName: 'getInvoice' as const,
+    args: [safeBigInt(inv.id)],
+  }))
+
+  const { data: liveData } = useReadContracts({
+    contracts,
+    query: { enabled: history.length > 0 },
+  })
+
+  const nowSec = BigInt(Math.floor(Date.now() / 1000))
+
+  const getStatus = (idx: number): 'paid' | 'expired' | 'pending' | null => {
+    const result = liveData?.[idx]
+    if (!result || result.status !== 'success') return null
+    const inv = result.result as any
+    if (inv?.paid) return 'paid'
+    if (inv?.expiry && nowSec > BigInt(inv.expiry)) return 'expired'
+    return 'pending'
+  }
+
   return (
     <div className="container">
       <Link to="/" className="back-link"><ChevronLeft size={16} /> Dashboard</Link>
@@ -639,7 +847,13 @@ function MyInvoices() {
         </Link>
       </div>
 
-      {history.length === 0 ? (
+      {loading ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <InvoiceSkeleton />
+          <InvoiceSkeleton />
+          <InvoiceSkeleton />
+        </div>
+      ) : history.length === 0 ? (
         <div className="empty-state">
           <Receipt size={40} style={{ opacity: 0.3, marginBottom: '12px' }} />
           <p>No invoices yet.</p>
@@ -649,33 +863,59 @@ function MyInvoices() {
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          {history.map((inv) => (
-            <div key={inv.id} className="invoice-row card">
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <p style={{ fontWeight: 700, fontSize: '1rem' }}>{inv.amount} USDC</p>
-                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {inv.note || '—'}
-                </p>
-                <p style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                  {new Date(inv.date).toLocaleDateString()} · #{inv.id}
-                </p>
-              </div>
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexShrink: 0 }}>
-                <button onClick={() => handleCopy(inv.id)} className="btn-ghost btn-sm">
-                  <Copy size={13} /> {copied === inv.id ? 'Copied!' : 'Link'}
-                </button>
-                <Link to={`/invoice/${inv.id}`} className="btn-ghost btn-sm">View</Link>
-                <a
-                  href={`https://testnet.arcscan.app/tx/${inv.hash}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="btn-ghost btn-sm"
-                >
-                  <ExternalLink size={13} />
-                </a>
-              </div>
-            </div>
-          ))}
+          {history.map((inv, idx) => {
+            const status = getStatus(idx)
+            return (
+              <motion.div
+                key={inv.id}
+                className="invoice-row card"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: idx * 0.04 }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <p style={{ fontWeight: 700, fontSize: '1rem' }}>{inv.amount} USDC</p>
+                    {status === 'paid' && (
+                      <span className="badge badge-paid" style={{ fontSize: '0.65rem', padding: '2px 8px' }}>
+                        <CheckCircle size={10} /> Paid
+                      </span>
+                    )}
+                    {status === 'expired' && (
+                      <span className="badge badge-expired" style={{ fontSize: '0.65rem', padding: '2px 8px' }}>
+                        <Clock size={10} /> Expired
+                      </span>
+                    )}
+                    {status === 'pending' && (
+                      <span className="badge badge-pending" style={{ fontSize: '0.65rem', padding: '2px 8px' }}>
+                        Pending
+                      </span>
+                    )}
+                  </div>
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {inv.note || '—'}
+                  </p>
+                  <p style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                    {new Date(inv.date).toLocaleDateString()} · #{inv.id}
+                  </p>
+                </div>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexShrink: 0 }}>
+                  <button onClick={() => handleCopy(inv.id)} className="btn-ghost btn-sm">
+                    <Copy size={13} /> {copied === inv.id ? 'Copied!' : 'Link'}
+                  </button>
+                  <Link to={`/invoice/${inv.id}`} className="btn-ghost btn-sm">View</Link>
+                  <a
+                    href={`https://testnet.arcscan.app/tx/${inv.hash}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn-ghost btn-sm"
+                  >
+                    <ExternalLink size={13} />
+                  </a>
+                </div>
+              </motion.div>
+            )
+          })}
         </div>
       )}
     </div>
@@ -702,6 +942,7 @@ function App() {
     <Router>
       <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
         <Navbar />
+        <ToastContainer />
         <main style={{ flex: 1 }}>
           <Routes>
             <Route path="/"            element={<Landing />} />
